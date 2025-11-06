@@ -2,6 +2,22 @@
 Changelog for package teleop_twist_keyboard
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Local changes (2025-11-06)
+------------------------
+* Change default `stamped` parameter to `true`.
+  * The node now publishes `geometry_msgs/msg/TwistStamped` by default when
+    started without explicit parameters. This provides timestamps and enables
+    `frame_id` to be used by default.
+  * Rationale: prefer stamped messages for clearer timing and frame information.
+
+Local changes (2025-11-03)
+------------------------
+* Cloned repository and added `deadman_timeout` parameter.
+  * Adds an optional deadman timeout (seconds) to continue publishing the
+    last velocity for a short window after a keypress; stops when the
+    timeout expires. Useful for safety on our robot platform.
+  * Maintainer: Avidbots (cloned package)
+
 2.4.1 (2025-09-26)
 ------------------
 * replace tests_require with extra_require (`#38 <https://github.com/ros2/teleop_twist_keyboard/issues/38>`_)

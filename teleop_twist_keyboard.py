@@ -193,12 +193,12 @@ def main():
 
     # parameters
     read_only_descriptor = rcl_interfaces.msg.ParameterDescriptor(read_only=True)
-    stamped = node.declare_parameter('stamped', False, read_only_descriptor).value
+    stamped = node.declare_parameter('stamped', True, read_only_descriptor).value
     frame_id = node.declare_parameter('frame_id', '', read_only_descriptor).value
     speed = node.declare_parameter('speed', 0.5, read_only_descriptor).value
     turn = node.declare_parameter('turn', 1.0, read_only_descriptor).value
     deadman_timeout = node.declare_parameter(
-        'deadman_timeout', -1.0, read_only_descriptor
+        'deadman_timeout', 0.1, read_only_descriptor
     ).value
 
     msg = (
