@@ -31,8 +31,10 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+import select
 import sys
 import threading
+import time
 
 import geometry_msgs.msg
 import rcl_interfaces.msg
@@ -64,6 +66,9 @@ t : up (+z)
 b : down (-z)
 
 anything else : stop
+
+DEADMAN: hold a movement or speed key to maintain motion. If no valid key is
+pressed within the timeout the node will publish zero velocities.
 
 q/z : increase/decrease max speeds by 10%
 w/x : increase/decrease only linear speed by 10%
@@ -103,14 +108,66 @@ speedBindings = {
 }
 
 
-def getKey(settings):
+def getKey(settings, timeout=0.0):
+    r"""
+    Read a single keypress from stdin.
+
+    On POSIX systems this function sets the terminal into raw mode, waits
+    up to `timeout` seconds for input, then restores the terminal settings
+    before returning. On Windows this function uses `msvcrt.kbhit()` and
+    `msvcrt.getwch()` and does not manipulate terminal settings.
+
+    Args
+    ----
+    - settings: terminal settings returned by `termios.tcgetattr(sys.stdin)`
+        (ignored / may be `None` on Windows).
+    - timeout (float): maximum seconds to wait for input. `0.0` makes the
+        call non-blocking (returns immediately). If `timeout > 0.0`, the
+        function blocks for up to `timeout` seconds waiting for a key.
+
+    Returns
+    -------
+    - key (str): a single-character string read from stdin, or '' when no
+        key was pressed before the timeout expired.
+
+    Notes
+    -----
+    - On Windows a blocking call with `timeout > 0.0` polls `msvcrt.kbhit()`
+      until the deadline, sleeping briefly between polls to avoid
+      busy-waiting.
+    - Control characters such as Ctrl-C are returned as their corresponding
+      single-character strings (e.g. `"\x03"`).
+
+    """
+    # Windows implementation using msvcrt
     if sys.platform == 'win32':
-        # getwch() returns a string on Windows
-        key = msvcrt.getwch()
-    else:
-        tty.setraw(sys.stdin.fileno())
-        # sys.stdin.read() returns a string on Linux
-        key = sys.stdin.read(1)
+        # Non-blocking: return immediately if no key is available
+        if timeout == 0.0:
+            if msvcrt.kbhit():
+                return msvcrt.getwch()
+            return ''
+
+        # Blocking with timeout: poll for keypress until timeout expires
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            if msvcrt.kbhit():
+                return msvcrt.getwch()
+            time.sleep(0.01)
+        return ''
+
+    # POSIX implementation using tty, termios and select
+    fd = sys.stdin.fileno()
+    # Put terminal into raw mode so we get keypresses immediately
+    tty.setraw(fd)
+    try:
+        r, _, _ = select.select([sys.stdin], [], [], timeout)
+        if r:
+            # sys.stdin.read() returns a string on Linux
+            key = sys.stdin.read(1)
+        else:
+            key = ''
+    finally:
+        # Restore terminal settings before returning
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
     return key
 
@@ -144,6 +201,8 @@ def main():
     frame_id = node.declare_parameter('frame_id', '', read_only_descriptor).value
     speed = node.declare_parameter('speed', 0.5, read_only_descriptor).value
     turn = node.declare_parameter('turn', 1.0, read_only_descriptor).value
+    deadman_timeout = node.declare_parameter('deadman_timeout', 0.1).value
+    assert deadman_timeout > 0
 
     if not stamped and frame_id:
         raise Exception("'frame_id' can only be set when 'stamped' is True")
@@ -163,6 +222,7 @@ def main():
     z = 0.0
     th = 0.0
     status = 0.0
+    deadman_expiry = 0.0
 
     twist_msg = TwistMsg()
 
@@ -177,12 +237,19 @@ def main():
         print(msg)
         print(vels(speed, turn))
         while True:
-            key = getKey(settings)
+            # poll for a keypress with a short timeout to avoid blocking the loop
+            key = getKey(settings, timeout=0.05)
+            now = time.time()
+
+            if key == '' and now <= deadman_expiry:
+                continue
+
             if key in moveBindings.keys():
                 x = moveBindings[key][0]
                 y = moveBindings[key][1]
                 z = moveBindings[key][2]
                 th = moveBindings[key][3]
+                deadman_expiry = now + float(deadman_timeout)
             elif key in speedBindings.keys():
                 speed = speed * speedBindings[key][0]
                 turn = turn * speedBindings[key][1]
