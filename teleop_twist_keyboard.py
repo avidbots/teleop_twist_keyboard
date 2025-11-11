@@ -31,17 +31,17 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-import select
 import sys
 import threading
 import time
 
 import geometry_msgs.msg
+from pynput import keyboard
 import rcl_interfaces.msg
 import rclpy
 
 if sys.platform == 'win32':
-    import msvcrt
+    import ctypes
 else:
     import termios
     import tty
@@ -108,84 +108,111 @@ speedBindings = {
 }
 
 
-def getKey(settings, timeout=0.0):
-    r"""
-    Read a single keypress from stdin.
+class KeyboardListener:
+    """Thread-based keyboard listener for key press/release detection."""
 
-    On POSIX systems this function sets the terminal into raw mode, waits
-    up to `timeout` seconds for input, then restores the terminal settings
-    before returning. On Windows this function uses `msvcrt.kbhit()` and
-    `msvcrt.getwch()` and does not manipulate terminal settings.
+    def __init__(self):
+        self.pressed_keys = set()
+        self.ctrl_pressed = False
+        self.lock = threading.Lock()
+        self.listener = None
 
-    Args
-    ----
-    - settings: terminal settings returned by `termios.tcgetattr(sys.stdin)`
-        (ignored / may be `None` on Windows).
-    - timeout (float): maximum seconds to wait for input. `0.0` makes the
-        call non-blocking (returns immediately). If `timeout > 0.0`, the
-        function blocks for up to `timeout` seconds waiting for a key.
+    def _on_press(self, key):
+        """Handle a key press."""
+        try:
+            # Try to get the character
+            char = key.char
+            if char:  # Only process actual characters
+                with self.lock:
+                    self.pressed_keys.add(char)
+        except AttributeError:
+            # Special keys
+            if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
+                with self.lock:
+                    self.ctrl_pressed = True
 
-    Returns
-    -------
-    - key (str): a single-character string read from stdin, or '' when no
-        key was pressed before the timeout expired.
+    def _on_release(self, key):
+        """Handle a key release."""
+        try:
+            char = key.char
+            if char:
+                with self.lock:
+                    self.pressed_keys.discard(char)
+        except AttributeError:
+            # Special keys
+            if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
+                with self.lock:
+                    self.ctrl_pressed = False
 
-    Notes
-    -----
-    - On Windows a blocking call with `timeout > 0.0` polls `msvcrt.kbhit()`
-      until the deadline, sleeping briefly between polls to avoid
-      busy-waiting.
-    - Control characters such as Ctrl-C are returned as their corresponding
-      single-character strings (e.g. `"\x03"`).
+    def start(self):
+        """Start the keyboard listener thread."""
+        self.listener = keyboard.Listener(
+            on_press=self._on_press,
+            on_release=self._on_release
+        )
+        self.listener.start()
 
-    """
-    # Windows implementation using msvcrt
-    if sys.platform == 'win32':
-        # Non-blocking: return immediately if no key is available
-        if timeout == 0.0:
-            if msvcrt.kbhit():
-                return msvcrt.getwch()
-            return ''
+    def stop(self):
+        """Stop the keyboard listener thread."""
+        if self.listener:
+            self.listener.stop()
 
-        # Blocking with timeout: poll for keypress until timeout expires
-        end_time = time.time() + timeout
-        while time.time() < end_time:
-            if msvcrt.kbhit():
-                return msvcrt.getwch()
-            time.sleep(0.01)
-        return ''
+    def get_pressed_keys(self):
+        """
+        Get the set of currently pressed keys.
 
-    # POSIX implementation using tty, termios and select
-    fd = sys.stdin.fileno()
-    # Put terminal into raw mode so we get keypresses immediately
-    tty.setraw(fd)
-    try:
-        r, _, _ = select.select([sys.stdin], [], [], timeout)
-        if r:
-            # sys.stdin.read() returns a string on Linux
-            key = sys.stdin.read(1)
-        else:
-            key = ''
-    finally:
-        # Restore terminal settings before returning
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
-    return key
+        Returns
+        -------
+            set: Set of character strings currently pressed.
+
+        """
+        with self.lock:
+            return self.pressed_keys.copy()
+
+    def ctrl_c_is_pressed(self):
+        """
+        Check if Ctrl+C was pressed.
+
+        Returns
+        -------
+            bool: True if Ctrl+C combination is currently pressed.
+
+        """
+        with self.lock:
+            return self.ctrl_pressed and 'c' in self.pressed_keys
 
 
 def saveTerminalSettings():
     if sys.platform == 'win32':
-        return None
+        # On Windows, save the console mode
+        kernel32 = ctypes.windll.kernel32
+        stdin_handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(stdin_handle, ctypes.byref(mode))
+        return (stdin_handle, mode.value)
     return termios.tcgetattr(sys.stdin)
 
 
 def restoreTerminalSettings(old_settings):
     if sys.platform == 'win32':
+        if old_settings is not None:
+            kernel32 = ctypes.windll.kernel32
+            stdin_handle, old_mode = old_settings
+            kernel32.SetConsoleMode(stdin_handle, old_mode)
         return
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
 
 def vels(speed, turn):
     return 'currently:\tspeed %.2f\tturn %.2f ' % (speed, turn)
+
+
+def safe_print(text):
+    """Print text with proper line endings for raw terminal mode."""
+    # In raw mode (both Unix and Windows), we need \r\n instead of just \n
+    text = text.replace('\n', '\r\n')
+    print(text, end='')
+    sys.stdout.flush()
 
 
 def main():
@@ -201,8 +228,9 @@ def main():
     frame_id = node.declare_parameter('frame_id', '', read_only_descriptor).value
     speed = node.declare_parameter('speed', 0.5, read_only_descriptor).value
     turn = node.declare_parameter('turn', 1.0, read_only_descriptor).value
-    deadman_timeout = node.declare_parameter('deadman_timeout', 0.1).value
-    assert deadman_timeout > 0
+    deadman_timeout = node.declare_parameter(
+        'deadman_timeout', -1.0, read_only_descriptor
+    ).value
 
     if not stamped and frame_id:
         raise Exception("'frame_id' can only be set when 'stamped' is True")
@@ -222,7 +250,7 @@ def main():
     z = 0.0
     th = 0.0
     status = 0.0
-    deadman_expiry = 0.0
+    last_motion_key_time = 0.0
 
     twist_msg = TwistMsg()
 
@@ -233,15 +261,42 @@ def main():
     else:
         twist = twist_msg
 
+    # Put terminal in raw mode to suppress key echo
+    if sys.platform != 'win32':
+        tty.setraw(sys.stdin.fileno())
+    else:
+        # On Windows, disable echo and line input mode
+        kernel32 = ctypes.windll.kernel32
+        stdin_handle = settings[0]
+        # Disable ENABLE_ECHO_INPUT (0x0004) and ENABLE_LINE_INPUT (0x0002)
+        new_mode = settings[1] & ~0x0006
+        kernel32.SetConsoleMode(stdin_handle, new_mode)
+
+    # Start pynput keyboard listener
+    listener = KeyboardListener()
+    listener.start()
+
     try:
-        print(msg)
-        print(vels(speed, turn))
+        safe_print(msg + '\n')
+        safe_print(vels(speed, turn) + '\n')
+        rate = node.create_rate(20)
         while True:
-            # poll for a keypress with a short timeout to avoid blocking the loop
-            key = getKey(settings, timeout=0.05)
+            rate.sleep()
+
+            if listener.ctrl_c_is_pressed():
+                break
+
+            # Get key presses
+            pressed_keys = listener.get_pressed_keys()
+            key = pressed_keys.pop() if len(pressed_keys) == 1 else ''
             now = time.time()
 
-            if key == '' and now <= deadman_expiry:
+            # Keep previous twist command if deadman is disabled
+            if key == '' and deadman_timeout <= 0:
+                continue
+
+            # Keep previous twist command if deadman hasn't timed out
+            if key == '' and now <= last_motion_key_time + deadman_timeout:
                 continue
 
             if key in moveBindings.keys():
@@ -249,14 +304,14 @@ def main():
                 y = moveBindings[key][1]
                 z = moveBindings[key][2]
                 th = moveBindings[key][3]
-                deadman_expiry = now + float(deadman_timeout)
+                last_motion_key_time = now
             elif key in speedBindings.keys():
                 speed = speed * speedBindings[key][0]
                 turn = turn * speedBindings[key][1]
 
-                print(vels(speed, turn))
+                safe_print(vels(speed, turn) + '\n')
                 if (status == 14):
-                    print(msg)
+                    safe_print(msg + '\n')
                 status = (status + 1) % 15
             else:
                 x = 0.0
@@ -278,7 +333,7 @@ def main():
             pub.publish(twist_msg)
 
     except Exception as e:
-        print(e)
+        safe_print(str(e) + '\n')
 
     finally:
         if stamped:
@@ -294,6 +349,16 @@ def main():
         rclpy.shutdown()
         spinner.join()
 
+        listener.stop()
+
+        # Flush any buffered input before restoring terminal settings
+        if sys.platform != 'win32':
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        else:
+            # On Windows, flush console input buffer
+            kernel32 = ctypes.windll.kernel32
+            stdin_handle = settings[0]
+            kernel32.FlushConsoleInputBuffer(stdin_handle)
         restoreTerminalSettings(settings)
 
 
