@@ -46,37 +46,6 @@ else:
     import termios
     import tty
 
-
-msg = """
-This node takes keypresses from the keyboard and publishes them
-as Twist/TwistStamped messages. It works best with a US keyboard layout.
----------------------------
-Moving around:
-   u    i    o
-   j    k    l
-   m    ,    .
-
-For Holonomic mode (strafing), hold down the shift key:
----------------------------
-   U    I    O
-   J    K    L
-   M    <    >
-
-t : up (+z)
-b : down (-z)
-
-anything else : stop
-
-DEADMAN: hold a movement or speed key to maintain motion. If no valid key is
-pressed within the timeout the node will publish zero velocities.
-
-q/z : increase/decrease max speeds by 10%
-w/x : increase/decrease only linear speed by 10%
-e/c : increase/decrease only angular speed by 10%
-
-CTRL-C to quit
-"""
-
 moveBindings = {
     'i': (1, 0, 0, 0),
     'o': (1, 0, 0, -1),
@@ -231,6 +200,46 @@ def main():
     deadman_timeout = node.declare_parameter(
         'deadman_timeout', -1.0, read_only_descriptor
     ).value
+
+    msg = (
+        """This node takes keypresses from the keyboard and publishes them\n"""
+        """as Twist/TwistStamped messages. It works best with a US keyboard layout.\n"""
+        """---------------------------\n"""
+        """Moving around:\n"""
+        """u    i    o\n"""
+        """j    k    l\n"""
+        """m    ,    .\n"""
+        """\n"""
+        """For Holonomic mode (strafing), hold down the shift key:\n"""
+        """---------------------------\n"""
+        """U    I    O\n"""
+        """J    K    L\n"""
+        """M    <    >\n"""
+        """\n"""
+        """t : up (+z)\n"""
+        """b : down (-z)\n"""
+        """\n"""
+        """anything else : stop\n"""
+        """\n"""
+    )
+    if deadman_timeout > 0:
+        msg += (
+            """DEADMAN: hold a movement or speed key to maintain motion. If no valid key is\n"""
+            """pressed within the timeout the node will publish zero velocities.\n"""
+            """\n"""
+            """NOTE: The deadman timeout is evaluated at 20Hz (every 0.05s). Timeout values\n"""
+            """less than 0.05s will effectively become 0.05s, and non-integer multiples of\n"""
+            """0.05s may trigger up to 0.05s late. For precise deadman behavior, use timeout\n"""
+            """values that are integer multiples of 0.05s (e.g., 0.05, 0.1, 0.15, etc.).\n"""
+            """\n"""
+        )
+    msg += (
+        """q/z : increase/decrease max speeds by 10%\n"""
+        """w/x : increase/decrease only linear speed by 10%\n"""
+        """e/c : increase/decrease only angular speed by 10%\n"""
+        """\n"""
+        """CTRL-C to quit\n"""
+    )
 
     if not stamped and frame_id:
         raise Exception("'frame_id' can only be set when 'stamped' is True")
