@@ -50,7 +50,7 @@ CTRL-C to quit
   - The speed the node starts with by default.
 - `turn (double, default: 1.0)`
   - The turn rate (rad/s) the node starts with by default.
-- `deadman_timeout (double, default: 0.1)`
-  - Deadman timeout in seconds. The node will continue publishing the last
-    velocity command for the configured timeout after the last keypress. If no
-    keypress occurs and the timeout expires, motion commands will stop.
+- `deadman_timeout (double, default: -1.0)`
+  - Deadman timeout in seconds. If <= 0, then the feature is disabled, otherwise the node will
+    continue publishing the last velocity command for the configured timeout after the last
+    keypress. If no keypress occurs and the timeout expires, motion commands will stop.
